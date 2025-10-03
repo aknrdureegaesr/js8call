@@ -20,6 +20,21 @@ JS8Call is a derivative of the WSJT-X application, restructured and redesigned f
 
 * Read below for recent updates to Qt6 and the removal of Fortran dependencies.
 
+# Debugging JS8Call
+
+You can get a lot of debug output reporting what the program does by setting the environment variable `QT_LOGGING_RULES` to an appropriate value.
+
+The value `*.js8=true` gives you all output there is.
+
+Each line starts with a "logging category". These can be used to filter, so fewer lines you are not interested in will be given.
+
+For example, if you are interested in lines starting with `mainwindow.js8` and `configuration.js8` only, to debug a certain problem, set `QT_LOGGING_RULES` to `mainwindow.js8=true;configuration.js8=true` to just see what those two have to say.
+
+You find `decoder.js8` a bit too noisy, you may use the value `*.js8=true;decoder.js8=false` to silence it, but still see all the others.
+
+The official documentation of what we are using here can be found at [https://doc.qt.io/qt-6/qloggingcategory.html#checking-category-configuration](https://doc.qt.io/qt-6/qloggingcategory.html#checking-category-configuration).
+
+
 # Building JS8Call From Sourcecode
 Instructions can be found in [docs](docs) in the source tree for building JS8Call on MacOS, Linux and Windows, as well as a contributor's guide.
 
