@@ -5,6 +5,7 @@
 
 namespace DriftingDateTime /*: QDateTime*/
 {
+    // All qint64 here are in Milliseconds
     qint64    drift();
     void      setDrift(qint64);
     qint64    incrementDrift(qint64);

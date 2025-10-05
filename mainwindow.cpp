@@ -4482,6 +4482,8 @@ void MainWindow::guiUpdate()
 
     // 15.0 - 12.6
     double const ratio = JS8::Submode::computeRatio(m_nSubMode, m_TRperiod);
+    qCDebug(mainwindow_js8) << "ms" << ms << ", ratio" << ratio << ", 1-ratio" << 1.0-ratio << ", fTR" << fTR
+                            << ", txDelay" << m_config.txDelay() << ", m_TRperiod" << m_TRperiod;
 
     if(fTR > 1.0-ratio && fTR < 1.0){
         if(!m_deadAirTone){
@@ -4755,8 +4757,10 @@ void MainWindow::guiUpdate()
 
   // Compute the processing time and adjust loop to hit the next 100ms
 
-  m_guiTimer.start(std::max(std::chrono::milliseconds(100 - timer.elapsed()),
-                            std::chrono::milliseconds::zero()));
+  auto const delay = std::max(std::chrono::milliseconds(100 - ms % 100 - timer.elapsed()),
+                              std::chrono::milliseconds::zero());
+  qCDebug(mainwindow_js8) << "See you again in" << delay.count() << "milliseconds";
+  m_guiTimer.start(delay);
 }               //End of guiUpdate
 
 
@@ -5725,17 +5729,21 @@ void MainWindow::prepareHeartbeat(){
 #endif
 
 void MainWindow::checkRepeat(){
+    qCDebug(mainwindow_js8) << "Checking whether CQ or HB";
+    if(ui->cqMacroButton->isChecked() && m_cqInterval > 0 && m_nextCQ.isValid()){
+        auto time_until_next_cq_wanted = DriftingDateTime::currentDateTimeUtc().secsTo(m_nextCQ);
+        qCDebug(mainwindow_js8) << "Want next CQ in" << time_until_next_cq_wanted;
+        if(time_until_next_cq_wanted <= 0){
+            sendCQ(true);
+        }
+    }
+
     if(ui->hbMacroButton->isChecked() && m_hbInterval > 0 && m_nextHeartbeat.isValid()){
         if(DriftingDateTime::currentDateTimeUtc().secsTo(m_nextHeartbeat) <= 0){
             sendHeartbeat();
         }
     }
 
-    if(ui->cqMacroButton->isChecked() && m_cqInterval > 0 && m_nextCQ.isValid()){
-        if(DriftingDateTime::currentDateTimeUtc().secsTo(m_nextCQ) <= 0){
-            sendCQ(true);
-        }
-    }
 }
 
 void MainWindow::on_startTxButton_toggled(bool checked)
@@ -6348,6 +6356,7 @@ void MainWindow::sendCQ(bool repeat){
         QString mygrid = m_config.my_grid().left(4);
         message = QString("CQ CQ CQ %1").arg(mygrid).trimmed();
     }
+    qCDebug(mainwindow_js8) << "Wanting to send CQ" << message;
 
     clearCallsignSelected();
 

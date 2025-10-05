@@ -1,4 +1,7 @@
+#include <QLoggingCategory>
 #include "DriftingDateTime.h"
+
+Q_DECLARE_LOGGING_CATEGORY(driftingdatetime_js8)
 
 namespace
 {
@@ -16,13 +19,15 @@ namespace DriftingDateTime
     void
     setDrift(qint64 const ms)
     {
+        qCDebug(driftingdatetime_js8) << "Setting drift to" << ms;
         driftMS = ms;
     }
 
     qint64
     incrementDrift(qint64 const msDelta)
     {
-        return driftMS += msDelta;
+        setDrift(driftMS + msDelta);
+        return drift();
     }
 
     QDateTime
@@ -49,3 +54,5 @@ namespace DriftingDateTime
         return currentMSecsSinceEpoch() / 1000;
     }
 }
+
+Q_LOGGING_CATEGORY(driftingdatetime_js8, "driftingdatetime.js8", QtWarningMsg)

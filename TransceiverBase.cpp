@@ -216,6 +216,7 @@ void TransceiverBase::update_mode (MODE m)
 
 void TransceiverBase::update_PTT (bool state)
 {
+  qCDebug(transceiverbase_js8) << "Setting PTT to: " << state;
   actual_.ptt (state);
 }
 
@@ -238,6 +239,7 @@ void TransceiverBase::offline (QString const& reason)
   catch (...)
     {
       // don't care
+      qCInfo(transceiverbase_js8) << "Ignoring problem during CAT shutdown.";
     }
 }
 
