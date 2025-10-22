@@ -706,6 +706,11 @@ Configuration::Configuration (QDir const& temp_directory,
                               QSettings * settings, QWidget * parent)
   : m_ {this, temp_directory, settings, parent}
 {
+    qCDebug(configuration_js8) << "Configuration constructor: Things have been set up.";
+}
+
+void Configuration::onPlumbingComplete() {
+    qCDebug(configuration_js8) << "Could send some initial signals here.";
 }
 
 Configuration::~Configuration ()

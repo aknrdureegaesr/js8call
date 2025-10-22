@@ -74,7 +74,7 @@ public slots:
   bool timeControlsVisible() const;
   void setControlsVisible(bool, bool = true);
   bool controlsVisible() const;
-  void driftChanged(qint64 drift_ms);
+  void onDriftChanged(qint64 drift_ms);
   void setPaused(bool paused){ m_paused = paused; }
   void notifyDriftedSignalsDecoded(int);
 

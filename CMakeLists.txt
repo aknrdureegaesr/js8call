@@ -284,6 +284,8 @@ target_sources(
   TransceiverBase.cpp
   TransceiverFactory.cpp
   TransmitTextEdit.cpp
+  TwoPhaseSignal.cpp
+  TxLoop.cpp
   varicode.cpp
   WF.cpp
   widegraph.cpp

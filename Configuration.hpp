@@ -260,6 +260,10 @@ public:
   // Close down connection to rig.
   void transceiver_offline ();
 
+  // Triggered once after everything has been set up
+  // to trigger initial volley of signals.
+  void onPlumbingComplete();
+
   // Set transceiver frequency in Hertz.
   Q_SLOT void transceiver_frequency (Frequency);
 

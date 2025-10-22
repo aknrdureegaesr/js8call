@@ -955,7 +955,7 @@ WideGraph::on_driftSyncResetButton_clicked()
 }
 
 void
-WideGraph::driftChanged(qint64 const n)
+WideGraph::onDriftChanged(qint64 const n)
 {
   qCDebug(widegraph_js8)
       << "Incoming new drift milliseconds:" << n

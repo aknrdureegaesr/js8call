@@ -1,10 +1,10 @@
 #ifndef DRIFTINGDATETIME_H
 #define DRIFTINGDATETIME_H
 
-#include <QObject>
 #include <QDateTime>
 #include <QMutex>
-
+#include <QPointer>
+#include "TwoPhaseSignal.h"
 
 /**
  * JS8Call allows the user to manipulate the clock.
@@ -33,49 +33,67 @@
  * is that many milliseconds later than the system clock,
  * a negative drift that many milliseconds earlier.
  *
- * This functionality is (intended to be) thread-safe.
+ * This functionality is (intended to be) thread-safe,
+ * with the exception of the setDrift(), which must be called
+ * by the same thread that originally constructed the object.
  **/
-
-class DriftingDateTimeSingleton: public QObject
+class DriftingDateTimeSingleton: public TwoPhaseSignal
 {
 Q_OBJECT
 
 private:
+    // As this is a subclass of QObject,
+    // it lives in a thread: Whatever thread
+    // first called getSingleton().
     DriftingDateTimeSingleton();
     qint64 driftMS;
-    QMutex mutex;
+    mutable QMutex mutex;
 
-    static DriftingDateTimeSingleton singleton;
+    static QPointer<DriftingDateTimeSingleton> singleton;
 
 private:
+    /**
+     * This needs to be called by the same thread that constructed the object.
+     */
     void setDriftInner(qint64 ms);
 
 public:
-    inline static DriftingDateTimeSingleton & getSingleton() {
-        return singleton;
-    }
+    /**
+     * The first thread that calls this is the thread the singleton lives in.
+     */
+    static DriftingDateTimeSingleton & getSingleton();
 
-    qint64 drift();
+    /**
+     * Retrive drift.
+     * Positive values indicate the drivted clock is behind the system clock,
+     * negative, it is early.
+     */
+    qint64 drift() const;
 
-    /** Various ways of retrieving "now": */
-    inline QDateTime currentDateTimeUtc() {
+    /** Retrieve drifted "now" as UTC. */
+    inline QDateTime currentDateTimeUtc() const {
         return QDateTime::currentDateTimeUtc().addMSecs(drift());
     }
 
-    inline QDateTime currentDateTimeLocal() {
+    /** Retrieve drifted "now" as local time. */
+    inline QDateTime currentDateTimeLocal() const {
         return QDateTime::currentDateTime().addMSecs(drift());
     }
 
-    inline qint64 currentMSecsSinceEpoch() {
+    /** Retrieve drifted "now" as milliseconds since epoch. */
+    inline qint64 currentMSecsSinceEpoch() const {
         return QDateTime::currentMSecsSinceEpoch() + drift();
     }
 
-    inline qint64 currentSecsSinceEpoch() {
+    /** Retrieve drifted "now" as seconds since epoch. */
+    inline qint64 currentSecsSinceEpoch() const {
         return currentMSecsSinceEpoch() / 1000;
     }
 
 public slots:
+    /** Set the drift. */
     void setDrift(qint64 ms);
+    void onPlumbingCompleted();
 
 signals:
     /**

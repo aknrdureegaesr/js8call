@@ -1,13 +1,21 @@
 #include <QMutexLocker>
 #include <QLoggingCategory>
+#include <QThread>
 
 #include "DriftingDateTime.h"
 
 Q_DECLARE_LOGGING_CATEGORY(driftingdatetime_js8)
 
-DriftingDateTimeSingleton::DriftingDateTimeSingleton(): driftMS(0), mutex() {}
+DriftingDateTimeSingleton & DriftingDateTimeSingleton::getSingleton() {
+    if (singleton.isNull()) {
+        singleton = QPointer{new DriftingDateTimeSingleton{}};
+    }
+    return *(singleton.data());
+}
 
-qint64 DriftingDateTimeSingleton::drift() {
+DriftingDateTimeSingleton::DriftingDateTimeSingleton(): driftMS(0) {}
+
+qint64 DriftingDateTimeSingleton::drift() const {
     QMutexLocker locker(&mutex);
     return driftMS;
 }
@@ -26,8 +34,12 @@ void DriftingDateTimeSingleton::setDrift(qint64 ms) {
     } else {
         qCDebug(driftingdatetime_js8) << "Incoming signal without change of drift, still" << old_drift << "ms";
     }
-};
+}
 
-DriftingDateTimeSingleton DriftingDateTimeSingleton::singleton = {};
+void DriftingDateTimeSingleton::onPlumbingCompleted() {
+    emit driftChanged(drift());
+}
+
+QPointer<DriftingDateTimeSingleton> DriftingDateTimeSingleton::singleton = QPointer<DriftingDateTimeSingleton>{};
 
 Q_LOGGING_CATEGORY(driftingdatetime_js8, "driftingdatetime.js8", QtWarningMsg)

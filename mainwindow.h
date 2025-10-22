@@ -50,6 +50,7 @@
 #include "MessageClient.hpp"
 #include "MessageServer.h"
 #include "TCPClient.h"
+#include "TxLoop.h"
 #include "SpotClient.h"
 #include "APRSISClient.h"
 #include "NotificationAudio.h"
@@ -112,15 +113,30 @@ private:
     bool    reverse;
   };
 
+  /**
+   * Sometimes, buttons are triggered by code
+   * for animation purposes only, without an intention to actually
+   * influence processing. In such cases, the pertinent IsReal
+   * variable will be false; normally, it will be true.
+   */
+  bool m_stopTxButtonIsReal;
+  bool m_hbButtonIsReal;
+  bool m_cqButtonIsReal;
+
 public slots:
   void showSoundInError(const QString& errorMsg);
   void showSoundOutError(const QString& errorMsg);
   void showStatusMessage(const QString& statusMsg);
   void dataSink(qint64 frames);
+  /**
+   * The name `guiUpdate` suggests updating of the views from the models
+   * (in MVC terms, but we don't do MVC in this project), animations and stuff.
+   * While it indeed does that, this also contains controller code.
+   */
   void guiUpdate();
   void setXIT(int n);
   void qsy(int hzDelta);
-  void driftChanged(qint64 new_drift_ms);
+  void onDriftChanged(qint64 new_drift_ms);
   void setFreqOffsetForRestore(int freq, bool shouldRestore);
   bool tryRestoreFreqOffset();
   void changeFreq(int);
@@ -164,6 +180,9 @@ public slots:
   QPair<QString, int> popMessageFrame();
   void tryNotify(const QString &key);
   void processDecodeEvent(JS8::Event::Variant const &);
+
+  void updateCQButtonDisplay();
+  void updateHBButtonDisplay();
 
 protected:
   void keyPressEvent (QKeyEvent *) override;
@@ -248,7 +267,7 @@ private slots:
   void buildHeartbeatMenu(QMenu *menu);
   void buildCQMenu(QMenu *menu);
   void buildRepeatMenu(QMenu *menu, QPushButton * button, bool isLowInterval, int * interval);
-  void sendHeartbeat();
+  void sendHB();
   void sendHeartbeatAck(QString to, int snr, QString extra);
   void on_hbMacroButton_toggled(bool checked);
   void on_hbMacroButton_clicked();
@@ -287,7 +306,6 @@ private slots:
   bool prepareNextMessageFrame();
   bool isFreqOffsetFree(int f, int bw);
   int findFreeFreqOffset(int fmin, int fmax, int bw);
-  void checkRepeat();
   void setDrift(int n);
   void on_tuneButton_clicked (bool);
   void acceptQSO (QDateTime const&, QString const& call, QString const& grid
@@ -370,6 +388,7 @@ private:
   Q_SIGNAL void sendMessage (double frequency, int submode, SoundOutput *, AudioDevice::Channel) const;
   Q_SIGNAL void outAttenuationChanged (qreal) const;
   Q_SIGNAL void toggleShorthand () const;
+  Q_SIGNAL void submodeChanged (Varicode::SubmodeType) const;
 
 private:
 
@@ -418,6 +437,12 @@ private:
   Modulator * m_modulator;
   SoundOutput * m_soundOutput;
   NotificationAudio * m_notification;
+
+  // This should be moved to the configuration eventually.
+  double m_previousTxDelay; // in seconds.
+
+  TxLoop * m_cq_loop;
+  TxLoop * m_hb_loop;
 
   QThread m_networkThread;
   QThread m_audioThread;
@@ -490,8 +515,6 @@ private:
   QTimer tuneATU_Timer;
   QTimer TxAgainTimer;
   QTimer minuteTimer;
-  QTimer repeatTimer;
-
   QString m_baseCall;
   QString m_hisCall;
   QString m_hisGrid;
@@ -681,11 +704,14 @@ private:
   bool m_bandHopped;
   Frequency m_bandHoppedFreq;
 
+  /** Repeat period of HBs, in seconds. */
   int m_hbInterval;
+  /** Repeat period of CQ calls, in seconds. */
   int m_cqInterval;
+
+  /** Whether to resume HBs at the next opportunity. */
   bool m_hbPaused;
-  QDateTime m_nextHeartbeat;
-  QDateTime m_nextCQ;
+
   QDateTime m_dateTimeQSOOn;
   QDateTime m_dateTimeLastTX;
 
@@ -742,7 +768,6 @@ private:
   void displayTransmit();
   void updateModeButtonText();
   void updateButtonDisplay();
-  void updateRepeatButtonDisplay();
   void updateTextDisplay();
   void updateTextWordCheckerDisplay();
   void updateTextStatsDisplay(QString text, int count);
@@ -784,9 +809,6 @@ private:
   void enable_DXCC_entity (bool on);
   void setRig (Frequency = 0);  // zero frequency means no change
   QDateTime nextTransmitCycle();
-  void resetAutomaticIntervalTransmissions(bool stopCQ, bool stopHB);
-  void resetCQTimer(bool stop);
-  void resetHeartbeatTimer(bool stop);
   void statusUpdate ();
   void on_the_minute ();
   void tryBandHop();

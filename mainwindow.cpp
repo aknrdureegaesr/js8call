@@ -82,6 +82,10 @@
 
 Q_DECLARE_LOGGING_CATEGORY(mainwindow_js8)
 
+// How often to poll the UI, in MS.
+// Some things may depend on this being a divisor of 1000.
+constexpr quint32 UI_POLL_INTERVAL_MS = 100;
+
 int volatile    itone[JS8_NUM_SYMBOLS];  // Audio tones for all Tx symbols
 struct dec_data dec_data;                // for sharing with Fortran
 struct specData specData;                // Used by plotter
@@ -303,6 +307,9 @@ MainWindow::MainWindow(QString  const & program_info,
                        MultiSettings  * multi_settings,
                        QWidget        * parent) :
   QMainWindow(parent),
+  m_stopTxButtonIsReal{true},
+  m_hbButtonIsReal {true},
+  m_cqButtonIsReal {true},
   m_network_manager {this},
   m_valid {true},
   m_multiple {multiple},
@@ -324,6 +331,8 @@ MainWindow::MainWindow(QString  const & program_info,
   m_modulator {new Modulator},
   m_soundOutput {new SoundOutput},
   m_notification {new NotificationAudio},
+  m_cq_loop {new TxLoop {"CQ calls"}},
+  m_hb_loop {new TxLoop {"HB calls"}},
   m_decoder {this},
   m_secBandChanged {0},
   m_freqNominal {0},
@@ -623,7 +632,7 @@ MainWindow::MainWindow(QString  const & program_info,
   m_guiTimer.setTimerType(Qt::PreciseTimer);
   m_guiTimer.setSingleShot(true);
   connect(&m_guiTimer, &QTimer::timeout, this, &MainWindow::guiUpdate);
-  m_guiTimer.start(100);   //### Don't change the 100 ms! ###
+  m_guiTimer.start(UI_POLL_INTERVAL_MS);
 
   ptt0Timer.setSingleShot(true);
   connect(&ptt0Timer, &QTimer::timeout, this, &MainWindow::stopTx2);
@@ -643,15 +652,41 @@ MainWindow::MainWindow(QString  const & program_info,
   TxAgainTimer.setSingleShot(true);
   connect(&TxAgainTimer, &QTimer::timeout, this, &MainWindow::TxAgain);
 
-  repeatTimer.setSingleShot(false);
-  repeatTimer.setInterval(1000);
-  connect(&repeatTimer, &QTimer::timeout, this, &MainWindow::checkRepeat);
-
   connect(m_wideGraph.data(), &WideGraph::changeFreq, this, &MainWindow::changeFreq);
   connect(m_wideGraph.data(), &WideGraph::qsy,        this, &MainWindow::qsy);
-  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, this, &MainWindow::driftChanged);
-  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, m_wideGraph.data(), &WideGraph::driftChanged);
+
+  // DriftingDateTime management:
   connect(m_wideGraph.data(), &WideGraph::want_new_drift, &DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::setDrift);
+
+  // Distribute Drift change:
+  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, this, &MainWindow::onDriftChanged);
+  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, m_wideGraph.data(), &WideGraph::onDriftChanged);
+  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, m_cq_loop, &TxLoop::onDriftChange);
+  connect(&DriftingDateTimeSingleton::getSingleton(), &DriftingDateTimeSingleton::driftChanged, m_hb_loop, &TxLoop::onDriftChange);
+
+  // HB and CQ loop:
+  // For now, disable HB loop while CQ loop runs and vice versa:
+  connect(m_cq_loop, &TxLoop::nextActivityChanged, this, [this](const QDateTime&){this->m_hb_loop->onLoopCancel();});
+  connect(m_hb_loop, &TxLoop::nextActivityChanged, this, [this](const QDateTime&){this->m_cq_loop->onLoopCancel();});
+
+  // Propagate tx mode changes:
+  connect(this, &MainWindow::submodeChanged, this->m_hb_loop, &TxLoop::onModeChange);
+  connect(this, &MainWindow::submodeChanged, this->m_cq_loop, &TxLoop::onModeChange);
+
+  // When the loops are switched off and on, steer the UI:
+  // ui->hbMacroButton->setChecked(true);
+  connect(m_hb_loop, &TxLoop::canceled, ui->hbMacroButton, [this](){this->ui->hbMacroButton->setChecked(false);});
+  connect(m_cq_loop, &TxLoop::canceled, ui->cqMacroButton, [this](){this->ui->cqMacroButton->setChecked(false);});
+
+  // Trigger the actual sending.
+  connect(m_hb_loop, &TxLoop::triggerTxNow, this, [this](){this->sendHB();});
+  connect(m_cq_loop, &TxLoop::triggerTxNow, this, [this](){this->sendCQ(true);});
+
+  // The following signals do not exist, and also m_config thinks a tx delay should be seconds
+  // as double whereas the TxLoop wants ms as qint64.
+  // So we do the equivalent of the following in a pedestrian way in guiUpdate().
+  // connect(m_config, &Configuration::txDelayChanged, m_cq_loop, &TxLoop::onTxDelayChange);
+  // connect(m_config, &Configuration::txDelayChanged, m_hb_loop, &TxLoop::onTxDelayChange);
 
   decodeBusy(false);
 
@@ -1361,6 +1396,15 @@ MainWindow::MainWindow(QString  const & program_info,
 
   m_txTextDirtyDebounce.setSingleShot(true);
   connect(&m_txTextDirtyDebounce, &QTimer::timeout, this, &MainWindow::refreshTextDisplay);
+  qCDebug(mainwindow_js8) << "Main window constructor has done all connect work.";
+  m_previousTxDelay = m_config.txDelay();
+  m_hb_loop->onTxDelayChange(llround(m_previousTxDelay * 1000.0));
+  m_cq_loop->onTxDelayChange(llround(m_previousTxDelay * 1000.0));
+  m_hb_loop->onPlumbingCompleted();
+  m_cq_loop->onPlumbingCompleted();
+  DriftingDateTimeSingleton::getSingleton().onPlumbingCompleted();
+  qCDebug(mainwindow_js8) << "Initialization with onPlumbingCompleted() has completed.";
+  m_config.onPlumbingComplete();
 
   QTimer::singleShot(500, this, &MainWindow::initializeDummyData);
   QTimer::singleShot(500, this, &MainWindow::initializeGroupMessageDummyData);
@@ -2927,6 +2971,8 @@ void MainWindow::on_monitorTxButton_toggled(bool checked){
     resetPushButtonToggleText(ui->monitorTxButton);
 
     if(!checked){
+        qCDebug(mainwindow_js8)
+                << "on_monitorTxButton_toggled(" << checked << ") stops all TX";
         on_stopTxButton_clicked();
     }
 }
@@ -2941,9 +2987,17 @@ void MainWindow::on_spotButton_toggled(bool){
 
 void MainWindow::auto_tx_mode (bool state)
 {
+  qCDebug(mainwindow_js8) << "auto_tx_mode(" << state << ")";
   m_auto = state;
   statusUpdate();
-  if (!state) on_stopTxButton_clicked();
+  if (!state) {
+      // This function is called recursively from on_stopTxButton_clicked()!
+      bool previous_stopTxButtonIsReal = m_stopTxButtonIsReal;
+      m_stopTxButtonIsReal = false;
+      on_stopTxButton_clicked();
+      m_stopTxButtonIsReal = previous_stopTxButtonIsReal;
+  }
+  qCDebug(mainwindow_js8) << "auto_tx_mode(" << state << ") completed.";
 }
 
 void MainWindow::keyPressEvent (QKeyEvent * e)
@@ -2981,6 +3035,7 @@ void MainWindow::setSubmode(int submode){
     ui->actionModeJS8Slow->setChecked(submode == Varicode::JS8CallSlow);
     ui->actionModeJS8Ultra->setChecked(submode == Varicode::JS8CallUltra);
     setupJS8();
+    Q_EMIT submodeChanged(Varicode::intToSubmode(submode));
 }
 
 void MainWindow::updateCurrentBand(){
@@ -3775,30 +3830,6 @@ QDateTime MainWindow::nextTransmitCycle(){
     return timestamp;
 }
 
-void MainWindow::resetAutomaticIntervalTransmissions(bool stopCQ, bool stopHB){
-    resetCQTimer(stopCQ);
-    resetHeartbeatTimer(stopHB);
-}
-
-void MainWindow::resetCQTimer(bool stop){
-    if(ui->cqMacroButton->isChecked() && m_cqInterval > 0){
-        ui->cqMacroButton->setChecked(false);
-        if(!stop){
-            ui->cqMacroButton->setChecked(true);
-        }
-    }
-}
-
-void MainWindow::resetHeartbeatTimer(bool stop){
-    // toggle the heartbeat timer if we have a repeating heartbeat
-    if(ui->hbMacroButton->isChecked() && m_hbInterval > 0){
-        ui->hbMacroButton->setChecked(false);
-        if(!stop){
-            ui->hbMacroButton->setChecked(true);
-        }
-    }
-}
-
 QList<int> generateOffsets(int minOffset, int maxOffset){
     QList<int> offsets;
 
@@ -4497,11 +4528,17 @@ void MainWindow::guiUpdate()
   static char   message[29];
   static char   msgsent[29];
   static int    msgibits;
-  QElapsedTimer timer;
-
-  timer.start();
 
   if(m_TRperiod==0) m_TRperiod=60;
+
+  // Propagate any tx delay change to m_hb_loop and m_cq_loop.
+  double tx_delay_now = m_config.txDelay();
+  if(tx_delay_now != m_previousTxDelay) {
+      m_previousTxDelay = tx_delay_now;
+      qint64 tx_delay_ms = std::lround(tx_delay_now * 1000);
+      m_hb_loop->onTxDelayChange(tx_delay_ms);
+      m_cq_loop->onTxDelayChange(tx_delay_ms);
+  }
 
   double tx1 = 0.0;
   double tx2 = JS8::Submode::txDuration(m_nSubMode);
@@ -4521,7 +4558,7 @@ void MainWindow::guiUpdate()
   if(m_transmitting or m_auto or m_tune) {
     m_dateTimeLastTX = DriftingDateTime::currentDateTimeLocal ();
 
-// Don't transmit another mode in the 30 m WSPR sub-band
+    // Don't transmit another mode in the 30 m WSPR sub-band
     Frequency onAirFreq = m_freqNominal + freq();
 
     //qCDebug(mainwindow_js8) << "transmitting on" << onAirFreq;
@@ -4549,8 +4586,14 @@ void MainWindow::guiUpdate()
     auto const fTR       = float((ms % (1000 * m_TRperiod))) /
                                        (1000 * m_TRperiod);
 
+
     // TODO: stop
-    if (msgLength == 0 && !m_tune) on_stopTxButton_clicked();
+    if (msgLength == 0 && !m_tune) {
+        qCDebug(mainwindow_js8) << "Halting TX from GUI update.";
+        m_stopTxButtonIsReal = false;
+        this->on_stopTxButton_clicked();
+        m_stopTxButtonIsReal = true;
+    }
 
     // 15.0 - 12.6
     double const ratio = JS8::Submode::computeRatio(m_nSubMode, m_TRperiod);
@@ -4580,7 +4623,7 @@ void MainWindow::guiUpdate()
     else if(m_nSubMode == Varicode::JS8CallUltra){
         // for the ultra mode, only allow 1/2 late threshold
         lateThreshold *= 0.5;
-    }
+    };
     if(m_iptt == 0 && ((m_bTxTime && fTR < lateThreshold && msgLength > 0) || m_tune))
     {
       //### Allow late starts
@@ -4652,7 +4695,6 @@ void MainWindow::guiUpdate()
       write_transmit_entry ("ALL.TXT");
     }
 
-    auto t2 = DriftingDateTime::currentDateTimeUtc ().toString ("hhmm");
     auto msg_parts = m_currentMessage.split (' ', Qt::SkipEmptyParts);
     if (msg_parts.size () > 2) {
       // clean up short code forms
@@ -4801,8 +4843,8 @@ void MainWindow::guiUpdate()
     // update the dial frequency once per second..
     displayDialFrequency();
 
-    // update repeat button text once per second..
-    updateRepeatButtonDisplay();
+    updateHBButtonDisplay();
+    updateCQButtonDisplay();
 
     // once per second...but not when we're transmitting, unless it's in the first second...
     if(!m_transmitting || (m_sec0 % (m_TRperiod) == 0)){
@@ -4825,11 +4867,12 @@ void MainWindow::guiUpdate()
   m_iptt0  = m_iptt;
   m_btxok0 = m_btxok;
 
-  // Compute the processing time and adjust loop to hit the next 100ms
-
-  m_guiTimer.start(std::max(std::chrono::milliseconds(100 - timer.elapsed()),
-                            std::chrono::milliseconds::zero()));
-}               //End of guiUpdate
+  // Set the time to hit the start of the next UI_POLL_INTERVAL_MS slot.
+  qint64 now = DriftingDateTime::currentMSecsSinceEpoch();
+  qint64 time_consumed_this_slot = now % UI_POLL_INTERVAL_MS;
+  qint64 until_start_of_next_slot = UI_POLL_INTERVAL_MS - time_consumed_this_slot;
+  m_guiTimer.start(until_start_of_next_slot);
+} //End of guiUpdate
 
 
 void MainWindow::startTx()
@@ -4905,7 +4948,10 @@ void MainWindow::stopTx()
       ui->extFreeTextMsgEdit->clear();
       ui->extFreeTextMsgEdit->setReadOnly(false);
       update_dynamic_property(ui->extFreeTextMsgEdit, "transmitting", false);
+      bool previous_stopTxButtonIsReal = m_stopTxButtonIsReal;
+      m_stopTxButtonIsReal = false;
       on_stopTxButton_clicked();
+      m_stopTxButtonIsReal = previous_stopTxButtonIsReal;
       tryRestoreFreqOffset();
   }
 
@@ -5439,11 +5485,14 @@ QString MainWindow::createMessageTransmitQueue(QString const& text, bool reset, 
 
   // TODO: jsherer - move this outside of create message transmit queue
   // if we're transmitting a message to be displayed, we should bump the repeat buttons...
-#if JS8HB_RESET_HB_TIMER_ON_TX
-  resetAutomaticIntervalTransmissions(false, false);
-#else
-  resetCQTimer(false);
-#endif
+  // "Bump the repeat buttons" from 2018
+  // probably translates to "stop automatic transmission loops" in 2025:
+  // qCDebug(mainwindow_js8) << "Cancel HB and CQ transmit loops in createMessageTransmitQueue";
+  // m_cq_loop->onLoopCancel();
+  // m_hb_loop->onLoopCancel();
+  // But the loops cause this code to be executed as part of their
+  // normal operation, when the first transmission is sent.
+  // So the cancelation makes it impossible to iterate through the loop a second time.
 
   // return the text
   return lines.join("");
@@ -5796,20 +5845,6 @@ void MainWindow::prepareHeartbeat(){
 }
 #endif
 
-void MainWindow::checkRepeat(){
-    if(ui->hbMacroButton->isChecked() && m_hbInterval > 0 && m_nextHeartbeat.isValid()){
-        if(DriftingDateTime::currentDateTimeUtc().secsTo(m_nextHeartbeat) <= 0){
-            sendHeartbeat();
-        }
-    }
-
-    if(ui->cqMacroButton->isChecked() && m_cqInterval > 0 && m_nextCQ.isValid()){
-        if(DriftingDateTime::currentDateTimeUtc().secsTo(m_nextCQ) <= 0){
-            sendCQ(true);
-        }
-    }
-}
-
 void MainWindow::on_startTxButton_toggled(bool checked)
 {
     if(checked){
@@ -5824,6 +5859,7 @@ void MainWindow::on_startTxButton_toggled(bool checked)
 void MainWindow::toggleTx(bool start){
     if(start && ui->startTxButton->isChecked()) { return; }
     if(!start && !ui->startTxButton->isChecked()) { return; }
+    qCDebug(mainwindow_js8) << "toggleTx(" << start << ") setting the TX button.";
     ui->startTxButton->setChecked(start);
 }
 
@@ -6060,10 +6096,11 @@ void MainWindow::prepareMonitorControls(){
     ui->monitorTxButton->setChecked(!m_config.transmit_off_at_startup());
 }
 
-void MainWindow::prepareHeartbeatMode(bool enabled){
-    // heartbeat is only available in a supported HB mode
+void MainWindow::prepareHeartbeatMode(bool enabled) {
+    // Not all submodes supports HBs.
     ui->hbMacroButton->setVisible(enabled);
-    if(!enabled){
+    if(!enabled) {
+        m_hb_loop->onLoopCancel();
         ui->hbMacroButton->setChecked(false);
     }
     ui->actionHeartbeat->setEnabled(enabled);
@@ -6100,8 +6137,7 @@ void MainWindow::prepareHeartbeatMode(bool enabled){
     // ui->actionShow_Band_Heartbeats_and_ACKs->setEnabled(false);
 #endif
 
-    // update the HB button immediately
-    updateRepeatButtonDisplay();
+    updateHBButtonDisplay();
     updateButtonDisplay();
 }
 
@@ -6242,7 +6278,7 @@ void MainWindow::buildHeartbeatMenu(QMenu *menu){
 
     menu->addSeparator();
     auto now = menu->addAction("Send Heartbeat Now");
-    connect(now, &QAction::triggered, this, &MainWindow::sendHeartbeat);
+    connect(now, &QAction::triggered, this, &MainWindow::sendHB);
 }
 
 void MainWindow::buildCQMenu(QMenu *menu){
@@ -6256,7 +6292,7 @@ void MainWindow::buildCQMenu(QMenu *menu){
 
     menu->addSeparator();
     auto now = menu->addAction("Send CQ Now");
-    connect(now, &QAction::triggered, this, [this](){ sendCQ(true); });
+    connect(now, &QAction::triggered, this, [this](){ sendCQ(false); });
 }
 
 void MainWindow::buildRepeatMenu(QMenu *menu, QPushButton * button, bool isLowInterval, int * interval){
@@ -6272,11 +6308,11 @@ void MainWindow::buildRepeatMenu(QMenu *menu, QPushButton * button, bool isLowIn
     };
 
     if(isLowInterval){
+        items.removeAt(6); // remove the sixty minute interval
         items.removeAt(5); // remove the thirty minute interval
-        items.removeAt(5); // remove the sixty minute interval
     } else {
+        items.removeAt(2); // remove the five minute interval
         items.removeAt(1); // remove the one minute interval
-        items.removeAt(1); // remove the five minute interval
     }
 
     auto customFormat = QString("Repeat every %1 minutes (Custom Interval)");
@@ -6297,7 +6333,7 @@ void MainWindow::buildRepeatMenu(QMenu *menu, QPushButton * button, bool isLowIn
             text = QString(customFormat).arg(*interval);
         }
 
-        auto action = menu->addAction(text);
+        QAction* action = menu->addAction(text);
         action->setData(minutes);
         action->setCheckable(true);
         action->setChecked(isMatch || isCustom);
@@ -6329,7 +6365,8 @@ void MainWindow::buildRepeatMenu(QMenu *menu, QPushButton * button, bool isLowIn
     }
 }
 
-void MainWindow::sendHeartbeat(){
+void MainWindow::sendHB(){
+
     QString mycall = m_config.my_callsign();
     QString mygrid = m_config.my_grid().left(4);
 
@@ -6385,6 +6422,7 @@ void MainWindow::sendHeartbeatAck(QString to, int snr, QString extra){
 }
 
 void MainWindow::on_hbMacroButton_toggled(bool checked){
+    qCDebug(mainwindow_js8) << "on_hbMacroButton_toggled(" << checked << ")";
     if(checked){
         // only clear callsign if we do not allow hbs while in qso
         if(m_config.heartbeat_qso_pause()){
@@ -6392,30 +6430,44 @@ void MainWindow::on_hbMacroButton_toggled(bool checked){
         }
 
         if(m_hbInterval){
-            m_nextHeartbeat = nextTransmitCycle().addSecs(m_hbInterval * 60);
-
-            if(!repeatTimer.isActive()){
-                repeatTimer.start();
+            if (! m_hb_loop->isActive()) {
+                qCDebug(mainwindow_js8) << "Starting HB loop from on_hbMacroButton_toggled()";
+                m_hb_loop->onTxLoopPeriodChangeStart(m_hbInterval* (qint64)60000);
             }
-
         } else {
-            sendHeartbeat();
+            qCDebug(mainwindow_js8) << "Sending single HB from on_hbMacroButton_toggled()";
+            m_hb_loop->onLoopCancel();
+            // Heartbeat, but not in a loop.
+            sendHB();
 
             // make this button emulate a single press button
             ui->hbMacroButton->setChecked(false);
         }
     } else {
-        m_nextHeartbeat = QDateTime{};
+        if(m_hb_loop->isActive() && m_hbButtonIsReal) {
+            qCDebug(mainwindow_js8) << "Stopping HB loop from on_hbMacroButton_toggled()";
+            m_hb_loop->onLoopCancel();
+        }
     }
-
-    updateRepeatButtonDisplay();
+    qCDebug(mainwindow_js8) << "updateHBButtonDisplay called via on_hbMacroButton_toggled";
+    updateHBButtonDisplay();
 }
 
-void MainWindow::on_hbMacroButton_clicked(){
+void MainWindow::on_hbMacroButton_clicked() {
 }
 
 void MainWindow::sendCQ(bool repeat){
-    auto message = m_config.cq_message();
+
+    if(!repeat && m_cq_loop->isActive()) {
+        qCDebug(mainwindow_js8) << "Cancel CQ loop on single-shot CQ";
+        m_cq_loop->onLoopCancel();
+    }
+    if(!repeat && m_hb_loop->isActive()) {
+        qCDebug(mainwindow_js8) << "Cancel HB loop on single-shot CQ";
+        m_hb_loop->onLoopCancel();
+    }
+
+    QString message = m_config.cq_message();
     if(message.isEmpty()){
         QString mygrid = m_config.my_grid().left(4);
         message = QString("CQ CQ CQ %1").arg(mygrid).trimmed();
@@ -6429,27 +6481,29 @@ void MainWindow::sendCQ(bool repeat){
 }
 
 void MainWindow::on_cqMacroButton_toggled(bool checked){
+    qCDebug(mainwindow_js8) << "on_cqMacroButton_toggled(" << checked << ")";
     if(checked){
         clearCallsignSelected();
 
         if(m_cqInterval){
-            m_nextCQ = nextTransmitCycle().addSecs(m_cqInterval * 60);
-
-            if(!repeatTimer.isActive()){
-                repeatTimer.start();
-            }
-
+            qCDebug(mainwindow_js8) << "Starting CQ loop from on_cqMacroButton_toggled()";
+            m_cq_loop->onTxLoopPeriodChangeStart(m_cqInterval * (qint64)60000);
         } else {
-            sendCQ();
+            qCDebug(mainwindow_js8) << "Sending single CQ from on_cqMacroButton_toggled()";
+            m_cq_loop->onLoopCancel();
+            sendCQ(false);
 
             // make this button emulate a single press button
             ui->cqMacroButton->setChecked(false);
         }
     } else {
-        m_nextCQ= QDateTime{};
+        if(m_cq_loop->isActive() && m_cqButtonIsReal) {
+            qCDebug(mainwindow_js8) << "Stopping CQ loop from on_cqMacroButton_toggled()";
+            m_cq_loop->onLoopCancel();
+        }
     }
-
-    updateRepeatButtonDisplay();
+    qCDebug(mainwindow_js8) << "updateCQButtonDisplay called via on_cqMacroButton_toggled";
+    updateCQButtonDisplay();
 }
 
 void MainWindow::on_cqMacroButton_clicked(){
@@ -7465,12 +7519,16 @@ void MainWindow::resetPushButtonToggleText(QPushButton *btn){
 
 void MainWindow::on_stopTxButton_clicked()                    //Stop Tx
 {
+  qCDebug(mainwindow_js8) << "Stopping TX activity as the stop TX button was clicked, for real" << m_stopTxButtonIsReal;
   if (m_tune) stop_tuning ();
   if (m_auto and !m_tuneup) auto_tx_mode (false);
   m_btxok=false;
 
   resetMessage();
-  resetAutomaticIntervalTransmissions(false, false);
+  if(m_stopTxButtonIsReal) {
+    m_hb_loop->onLoopCancel();
+    m_cq_loop->onLoopCancel();
+  }
 }
 
 void MainWindow::rigOpen ()
@@ -7544,7 +7602,7 @@ MainWindow::qsy(int const hzDelta)
   displayActivity(true);
 }
 
-void MainWindow::driftChanged(qint64 /*new_drift_ms*/){
+void MainWindow::onDriftChanged(qint64 /*new_drift_ms*/){
     // here we reset the buffer position without clearing the buffer
     // this makes the detected emit the correct k when drifting time
     qCDebug(mainwindow_js8) << "Processing drift change.";
@@ -7856,8 +7914,17 @@ void MainWindow::updateButtonDisplay(){
     bool emptyInfo = m_config.my_info().isEmpty();
     bool emptyStatus = m_config.my_status().isEmpty();
 
+    bool previous_hbButtonIsReal = m_hbButtonIsReal;
+    m_hbButtonIsReal = false;
     ui->hbMacroButton->setDisabled(isTransmitting);
+    m_hbButtonIsReal = previous_hbButtonIsReal;
+
+    bool previous_cqButtonIsReal = m_cqButtonIsReal;
+    m_cqButtonIsReal = false;
     ui->cqMacroButton->setDisabled(isTransmitting);
+    m_cqButtonIsReal = previous_cqButtonIsReal;
+
+
     ui->replyMacroButton->setDisabled(isTransmitting || emptyCallsign);
     ui->snrMacroButton->setDisabled(isTransmitting || emptyCallsign);
     ui->infoMacroButton->setDisabled(isTransmitting || emptyInfo);
@@ -7867,38 +7934,57 @@ void MainWindow::updateButtonDisplay(){
     ui->deselectButton->setDisabled(isTransmitting || emptyCallsign);
     ui->queryButton->setText(emptyCallsign ? "Directed" : QString("Directed to %1").arg(selectedCallsign));
 
-    // refresh repeat button text too
-    updateRepeatButtonDisplay();
-
     // update mode button text
     updateModeButtonText();
 }
 
-void MainWindow::updateRepeatButtonDisplay(){
-    auto selectedCallsign = callsignSelected();
-    auto hbBase = ui->actionModeAutoreply->isChecked() && ui->actionHeartbeatAcknowledgements->isChecked() && m_messageBuffer.isEmpty() && (!m_config.heartbeat_qso_pause() || selectedCallsign.isEmpty()) ? "HB + ACK" : "HB";
-    if(ui->hbMacroButton->isChecked() && m_hbInterval > 0 && m_nextHeartbeat.isValid()){
-        auto secs = DriftingDateTime::currentDateTimeUtc().secsTo(m_nextHeartbeat);
-        if(secs > 0){
+void MainWindow::updateHBButtonDisplay() {
+    if (m_hb_loop->isActive()) {
+        QDateTime now = DriftingDateTime::currentDateTimeUtc();
+        QDateTime nextHeartbeat = m_hb_loop->nextActivity();
+        long secs = std::lround(now.msecsTo(nextHeartbeat) / 1000.0);
+
+        // qCDebug(mainwindow_js8)
+        //         << "updateHBButtonDisplay, signal due at" << nextHeartbeat
+        //         << "so" << secs << "s to go";
+
+        bool wantAck = ui->actionModeAutoreply->isChecked() &&
+            ui->actionHeartbeatAcknowledgements->isChecked() &&
+            m_messageBuffer.isEmpty() &&
+            (!m_config.heartbeat_qso_pause() || callsignSelected().isEmpty());
+        QString hbBase = wantAck ? "HB + ACK" : "HB";
+
+        if(secs > 0) {
             ui->hbMacroButton->setText(QString("%1 (%2)").arg(hbBase).arg(secs));
         } else {
+            // Dead code?
             ui->hbMacroButton->setText(QString("%1 (now)").arg(hbBase));
         }
     } else {
-        ui->hbMacroButton->setText(hbBase);
+        ui->hbMacroButton->setText("HB");
     }
+}
 
-    if(ui->cqMacroButton->isChecked() && m_cqInterval > 0 && m_nextCQ.isValid()){
-        auto secs = DriftingDateTime::currentDateTimeUtc().secsTo(m_nextCQ);
-        if(secs > 0){
+void MainWindow::updateCQButtonDisplay() {
+    if (m_cq_loop->isActive()) {
+        QDateTime now = DriftingDateTime::currentDateTimeUtc();
+        QDateTime nextCQ = m_cq_loop->nextActivity();
+        long secs = std::lround(now.msecsTo(nextCQ) / 1000.0);
+        // qCDebug(mainwindow_js8)
+        //         << "updateCQButtonDisplay, signal due at" << nextCQ
+        //         << "so" << secs << "s to go";
+        if(secs > 0) {
             ui->cqMacroButton->setText(QString("CQ (%1)").arg(secs));
         } else {
-            ui->cqMacroButton->setText(QString("CQ (now)"));
+            // Dead code?
+            ui->cqMacroButton->setText("CQ (now)");
         }
     } else {
         ui->cqMacroButton->setText("CQ");
+        // qCDebug(mainwindow_js8) << "updateCQButtonDisplay while m_cq_loop is off";
     }
 }
+
 
 void MainWindow::updateTextDisplay(){
     bool canTransmit = ensureCanTransmit();
@@ -8117,7 +8203,7 @@ void MainWindow::callsignSelectedChanged(QString /*old*/, QString selectedCall){
     auto placeholderText = QString("Type your outgoing messages here.").toUpper();
     if(selectedCall.isEmpty()){
         // try to restore hb
-        if(m_hbPaused){
+        if(m_hbPaused) {
             ui->hbMacroButton->setChecked(true);
             m_hbPaused = false;
         }
@@ -8133,12 +8219,19 @@ void MainWindow::callsignSelectedChanged(QString /*old*/, QString selectedCall){
             // TODO: jsherer - HB issue
             // don't hb if we select a callsign... (but we should keep track so if we deselect, we restore our hb)
             if(ui->hbMacroButton->isChecked()){
+                qCDebug(mainwindow_js8)
+                        << "Unchecking hbMacroButton after selection" << selectedCall
+                        << "but planning to resurrect later";
                 ui->hbMacroButton->setChecked(false);
                 m_hbPaused = true;
+            } else {
+                // Just to make sure:
+                m_hbPaused = false;
             }
 
             // don't cq if we select a callsign... (and it will not be restored otherwise)
             if(ui->cqMacroButton->isChecked()){
+                qCDebug(mainwindow_js8) << "Unchecking cqMacroButton after selection" << selectedCall;
                 ui->cqMacroButton->setChecked(false);
             }
         }
@@ -8406,8 +8499,11 @@ void MainWindow::processRxActivity() {
         // log it to the display!
         displayTextForFreq(d.text, d.offset, d.utcTimestamp, false, isFirst, isLast);
 
-        // if we've received a message to be displayed, we should bump the repeat buttons...
-        resetAutomaticIntervalTransmissions(true, false);
+        // If we've received a message to be displayed, we should no longer call CQ.
+        if (m_cq_loop->isActive()) {
+            qCDebug(mainwindow_js8) << "Canceling calling CQ loop to priorize incoming messages.";
+            m_cq_loop->onLoopCancel();
+        }
 
         if(isLast){
             clearOffsetDirected(d.offset);
@@ -8860,9 +8956,13 @@ void MainWindow::processCommandActivity() {
             }
             */
 
-            if(!isAllCall){
-                // if we've received a message to be displayed, we should bump the repeat buttons...
-                resetAutomaticIntervalTransmissions(true, false);
+            if(!isAllCall) {
+                // If we've received a message to be displayed,
+                // we should no longer call CQ
+                if(m_cq_loop->isActive()) {
+                    qCDebug(mainwindow_js8) << "Canceling CQ loop to prioritize incoming messages, case II";
+                    m_cq_loop->onLoopCancel();
+                }
 
                 // notification for directed message
                 tryNotify("directed");
@@ -11135,6 +11235,7 @@ void MainWindow::tx_watchdog (bool triggered)
 
       // save the button states
       ui->actionModeAutoreply->setChecked(false);
+      qCDebug(mainwindow_js8) << "Unchecking the hbMacroButton and cqMacroButton from TX watchdog.";
       ui->hbMacroButton->setChecked(false);
       ui->cqMacroButton->setChecked(false);
 
